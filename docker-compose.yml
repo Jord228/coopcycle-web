@@ -98,7 +98,7 @@ services:
       - php
       - centrifugo
     ports:
-      - '80:80'
+      - '8381:80'
     volumes:
       - './docker/nginx/conf.d:/etc/nginx/conf.d:ro'
       - './web:/var/www/html/web:ro'
