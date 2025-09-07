@@ -120,7 +120,7 @@ services:
   smtp:
     image: namshi/smtp
     ports:
-      - 25:25
+      - 2525:25
 
   stripe_mock:
     image: stripe/stripe-mock:latest
