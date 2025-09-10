@@ -1,4 +1,4 @@
-# === CoopCycle on Render (full stack) ===
+# === CoopCycle on Render (full stack, Blueprint) ===
 # Services: web, worker, OSRM (as web), managed Postgres, managed Redis (Key-Value), cron
 
 services:
@@ -6,7 +6,7 @@ services:
   - type: web
     name: coopcycle-web
     env: docker
-    plan: standard            # start with 2GB RAM; bump if needed
+    plan: standard
     autoDeploy: true
     healthCheckPath: /
     envVars:
@@ -26,12 +26,12 @@ services:
       - key: TRUSTED_PROXIES
         value: 0.0.0.0/0,::/0
       - key: TRUSTED_HOSTS
-        value: '.*'            # tighten to your domains later
+        value: '.*'     # tighten to your domains later
       - key: SYMFONY_TRUSTED_PROXIES
         value: 0.0.0.0/0,::/0
       - key: SYMFONY_TRUSTED_HOSTS
         value: '.*'
-      # Mail / Stripe / S3 (set these in dashboard)
+      # Mail / Stripe / S3 (set these in Render dashboard)
       - key: MAILER_DSN
         sync: false
       - key: STRIPE_SECRET_KEY
@@ -48,13 +48,17 @@ services:
         sync: false
       - key: S3_REGION
         sync: false
-      # OSRM endpoint (points to the OSRM web service below)
+      # OSRM endpoint (points to OSRM service below)
       - key: OSRM_URL
         value: http://coopcycle-osrm:5000
-    postDeployCommand: |
-      php bin/console doctrine:migrations:migrate --no-interaction
-      php bin/console cache:clear --no-warmup
-      php bin/console cache:warmup
+    # Run migrations & warm cache, then start your web server
+    startCommand: >
+      sh -lc "
+        php bin/console doctrine:migrations:migrate --no-interaction &&
+        php bin/console cache:clear --no-warmup &&
+        php bin/console cache:warmup &&
+        ./start.sh
+      "
 
   # ---------------- WORKER (Symfony Messenger) ----------------
   - type: worker
@@ -79,14 +83,17 @@ services:
       - key: OSRM_URL
         value: http://coopcycle-osrm:5000
     startCommand: >
-      php bin/console messenger:consume async --time-limit=0 --memory-limit=256M -vv
+      sh -lc "
+        php bin/console cache:warmup &&
+        php bin/console messenger:consume async --time-limit=0 --memory-limit=256M -vv
+      "
 
   # ---------------- OSRM (runs as a Web service) ----------------
   - type: web
     name: coopcycle-osrm
     env: docker
-    plan: standard            # routing benefits from RAM; adjust as needed
-    autoDeploy: false         # enable after web/worker are healthy
+    plan: standard
+    autoDeploy: false         # turn on after web/worker are healthy
     envVars:
       - key: PORT
         value: 5000
