@@ -1,14 +1,14 @@
-# Render Infrastructure-as-Code for CoopCycle (full stack)
+# === CoopCycle on Render (full stack) ===
+# Services: web, worker, OSRM (as web), managed Postgres, managed Redis (Key-Value), cron
 
 services:
-  # --------------- WEB (Symfony/nginx/php-fpm) ---------------
+  # ---------------- WEB (Symfony/nginx/php-fpm) ----------------
   - type: web
     name: coopcycle-web
     env: docker
-    plan: standard                     # Start at 2GB RAM; bump if needed
+    plan: standard            # start with 2GB RAM; bump if needed
     autoDeploy: true
     healthCheckPath: /
-    # If your image listens on $PORT, Render injects it automatically.
     envVars:
       - key: APP_ENV
         value: prod
@@ -21,25 +21,23 @@ services:
       - key: REDIS_URL
         fromService:
           name: coopcycle-redis
-          type: private_service
-          property: hostport           # e.g. 10.***:6379
+          type: redis
+          property: connectionString
       - key: TRUSTED_PROXIES
         value: 0.0.0.0/0,::/0
       - key: TRUSTED_HOSTS
-        value: '.*'                    # or ^(coop\.tehub\.co\.uk|www\.coop\.tehub\.co\.uk)$
+        value: '.*'            # tighten to your domains later
       - key: SYMFONY_TRUSTED_PROXIES
         value: 0.0.0.0/0,::/0
       - key: SYMFONY_TRUSTED_HOSTS
         value: '.*'
-      # Mail / notifications
+      # Mail / Stripe / S3 (set these in dashboard)
       - key: MAILER_DSN
         sync: false
-      # Stripe/Stripe Connect (set in dashboard)
       - key: STRIPE_SECRET_KEY
         sync: false
       - key: STRIPE_PUBLIC_KEY
         sync: false
-      # S3/R2 media (recommended in prod)
       - key: S3_ENDPOINT
         sync: false
       - key: S3_BUCKET
@@ -50,19 +48,15 @@ services:
         sync: false
       - key: S3_REGION
         sync: false
-      # OSRM endpoint (once OSRM is up this resolves to the private host:port)
+      # OSRM endpoint (points to the OSRM web service below)
       - key: OSRM_URL
-        fromService:
-          name: coopcycle-osrm
-          type: private_service
-          property: hostport
-    # Run DB migrations and warm up cache after each deploy
+        value: http://coopcycle-osrm:5000
     postDeployCommand: |
       php bin/console doctrine:migrations:migrate --no-interaction
       php bin/console cache:clear --no-warmup
       php bin/console cache:warmup
 
-  # --------------- WORKER (Symfony Messenger consumer) ---------------
+  # ---------------- WORKER (Symfony Messenger) ----------------
   - type: worker
     name: coopcycle-worker
     env: docker
@@ -80,63 +74,55 @@ services:
       - key: REDIS_URL
         fromService:
           name: coopcycle-redis
-          type: private_service
-          property: hostport
+          type: redis
+          property: connectionString
       - key: OSRM_URL
-        fromService:
-          name: coopcycle-osrm
-          type: private_service
-          property: hostport
-    # Example Messenger queue; adjust if your queue transport name differs
-    startCommand: |
+        value: http://coopcycle-osrm:5000
+    startCommand: >
       php bin/console messenger:consume async --time-limit=0 --memory-limit=256M -vv
 
-  # --------------- OSRM (Routing Engine) ---------------
-  - type: private_service
+  # ---------------- OSRM (runs as a Web service) ----------------
+  - type: web
     name: coopcycle-osrm
     env: docker
-    plan: standard                     # OSRM benefits from RAM; start 2GB
-    autoDeploy: false                  # bring up after web works
-    dockerCommand: >
-      bash -lc "
-      set -euo pipefail;
-      if [ ! -f /data/britain.osm.pbf ]; then
-        echo 'Downloading GB extract...';
-        curl -L -o /data/britain.osm.pbf https://download.geofabrik.de/europe/great-britain-latest.osm.pbf;
-      fi;
-      if [ ! -f /data/britain.osrm ]; then
-        echo 'Building OSRM dataset (this can take a while)...';
-        osrm-extract -p /opt/car.lua /data/britain.osm.pbf;
-        osrm-partition /data/britain.osrm;
-        osrm-customize /data/britain.osrm;
-      fi;
-      echo 'Starting osrm-routed...';
-      osrm-routed --algorithm mld /data/britain.osrm --port $PORT
-      "
+    plan: standard            # routing benefits from RAM; adjust as needed
+    autoDeploy: false         # enable after web/worker are healthy
+    envVars:
+      - key: PORT
+        value: 5000
     image:
       url: osrm/osrm-backend:latest
+    startCommand: >
+      bash -lc "
+      set -euo pipefail;
+      if [ ! -f /data/gb.osm.pbf ]; then
+        echo 'Downloading Great Britain extract...';
+        curl -L -o /data/gb.osm.pbf https://download.geofabrik.de/europe/great-britain-latest.osm.pbf;
+      fi;
+      if [ ! -f /data/gb.osrm ]; then
+        echo 'Building OSRM dataset (first time can take a while)...';
+        osrm-extract -p /opt/car.lua /data/gb.osm.pbf;
+        osrm-partition /data/gb.osrm;
+        osrm-customize /data/gb.osrm;
+      fi;
+      echo 'Starting osrm-routed on $PORT...';
+      osrm-routed --algorithm mld /data/gb.osrm --port $PORT
+      "
     disk:
       name: osrm-data
       mountPath: /data
       sizeGB: 10
 
-  # --------------- REDIS (Container service) ---------------
-  - type: private_service
-    name: coopcycle-redis
-    env: docker
-    plan: starter
-    autoDeploy: true
-    image:
-      url: redis:7
-    # Render injects $PORT; tell Redis to listen there
-    startCommand: ["redis-server", "--protected-mode", "no", "--port", "$PORT", "--appendonly", "yes"]
-
+# ---------------- Managed services ----------------
 databases:
   - name: coopcycle-postgres
     plan: basic-1gb
 
-# --------------- CRON JOBS (optional housekeeping) ---------------
-# Render supports cron jobs that hit a service or run a command in a service
+keyValues:
+  - name: coopcycle-redis
+    plan: standard
+
+# ---------------- Cron (optional: Symfony scheduler) ----------------
 cronJobs:
   - name: symfony-scheduler
     schedule: "*/15 * * * *"
