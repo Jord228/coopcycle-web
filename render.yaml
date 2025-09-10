@@ -1,5 +1,5 @@
-# === CoopCycle on Render (full stack, Blueprint) ===
-# Services: web, worker, OSRM (as web), managed Postgres, managed Redis (Key-Value), cron
+# CoopCycle on Render (Web + Worker + OSRM)
+# Redis and Cron Jobs must be added manually in Render dashboard
 
 services:
   # ---------------- WEB (Symfony/nginx/php-fpm) ----------------
@@ -14,44 +14,27 @@ services:
         value: prod
       - key: APP_SECRET
         generateValue: true
+      # Database URL will be set manually in dashboard (see below)
       - key: DATABASE_URL
-        fromDatabase:
-          name: coopcycle-postgres
-          property: connectionString
+        sync: false
       - key: REDIS_URL
-        fromService:
-          name: coopcycle-redis
-          type: redis
-          property: connectionString
+        sync: false
       - key: TRUSTED_PROXIES
         value: 0.0.0.0/0,::/0
       - key: TRUSTED_HOSTS
-        value: '.*'     # tighten to your domains later
+        value: '.*'
       - key: SYMFONY_TRUSTED_PROXIES
         value: 0.0.0.0/0,::/0
       - key: SYMFONY_TRUSTED_HOSTS
         value: '.*'
-      # Mail / Stripe / S3 (set these in Render dashboard)
       - key: MAILER_DSN
         sync: false
       - key: STRIPE_SECRET_KEY
         sync: false
       - key: STRIPE_PUBLIC_KEY
         sync: false
-      - key: S3_ENDPOINT
-        sync: false
-      - key: S3_BUCKET
-        sync: false
-      - key: S3_ACCESS_KEY_ID
-        sync: false
-      - key: S3_SECRET_ACCESS_KEY
-        sync: false
-      - key: S3_REGION
-        sync: false
-      # OSRM endpoint (points to OSRM service below)
       - key: OSRM_URL
         value: http://coopcycle-osrm:5000
-    # Run migrations & warm cache, then start your web server
     startCommand: >
       sh -lc "
         php bin/console doctrine:migrations:migrate --no-interaction &&
@@ -72,14 +55,9 @@ services:
       - key: APP_SECRET
         sync: false
       - key: DATABASE_URL
-        fromDatabase:
-          name: coopcycle-postgres
-          property: connectionString
+        sync: false
       - key: REDIS_URL
-        fromService:
-          name: coopcycle-redis
-          type: redis
-          property: connectionString
+        sync: false
       - key: OSRM_URL
         value: http://coopcycle-osrm:5000
     startCommand: >
@@ -88,12 +66,12 @@ services:
         php bin/console messenger:consume async --time-limit=0 --memory-limit=256M -vv
       "
 
-  # ---------------- OSRM (runs as a Web service) ----------------
+  # ---------------- OSRM (Routing service) ----------------
   - type: web
     name: coopcycle-osrm
     env: docker
     plan: standard
-    autoDeploy: false         # turn on after web/worker are healthy
+    autoDeploy: false
     envVars:
       - key: PORT
         value: 5000
@@ -103,35 +81,16 @@ services:
       bash -lc "
       set -euo pipefail;
       if [ ! -f /data/gb.osm.pbf ]; then
-        echo 'Downloading Great Britain extract...';
         curl -L -o /data/gb.osm.pbf https://download.geofabrik.de/europe/great-britain-latest.osm.pbf;
       fi;
       if [ ! -f /data/gb.osrm ]; then
-        echo 'Building OSRM dataset (first time can take a while)...';
         osrm-extract -p /opt/car.lua /data/gb.osm.pbf;
         osrm-partition /data/gb.osrm;
         osrm-customize /data/gb.osrm;
       fi;
-      echo 'Starting osrm-routed on $PORT...';
       osrm-routed --algorithm mld /data/gb.osrm --port $PORT
       "
     disk:
       name: osrm-data
       mountPath: /data
       sizeGB: 10
-
-# ---------------- Managed services ----------------
-databases:
-  - name: coopcycle-postgres
-    plan: basic-1gb
-
-keyValues:
-  - name: coopcycle-redis
-    plan: standard
-
-# ---------------- Cron (optional: Symfony scheduler) ----------------
-cronJobs:
-  - name: symfony-scheduler
-    schedule: "*/15 * * * *"
-    serviceName: coopcycle-worker
-    command: "php bin/console scheduler:run || true"
